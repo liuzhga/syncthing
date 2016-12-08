@@ -1,0 +1,12 @@
+version: '2'
+services:
+  stdiscosrv:
+    image: stdiscosrv
+    depends_on:
+     - postgres 
+  postgres:
+    image: postgres:9.6 
+    environment:
+      - POSTGRES_USER=stdiscosrv
+      - POSTGRES_PASSWORD=kossanmu7
+
