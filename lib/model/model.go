@@ -97,9 +97,10 @@ type Model struct {
 	closed              map[protocol.DeviceID]chan struct{}
 	helloMessages       map[protocol.DeviceID]protocol.HelloResult
 	deviceDownloads     map[protocol.DeviceID]*deviceDownloadState
-	deviceStates        map[protocol.DeviceID]*deviceStateTracker
 	remotePausedFolders map[protocol.DeviceID][]string // deviceID -> folders
 	pmut                sync.RWMutex                   // protects the above
+
+	deviceStates *deviceStateMap
 }
 
 type folderFactory func(*Model, config.FolderConfiguration, versioner.Versioner, *fs.MtimeFS) service
@@ -159,10 +160,10 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, deviceName, clientName,
 		closed:              make(map[protocol.DeviceID]chan struct{}),
 		helloMessages:       make(map[protocol.DeviceID]protocol.HelloResult),
 		deviceDownloads:     make(map[protocol.DeviceID]*deviceDownloadState),
-		deviceStates:        make(map[protocol.DeviceID]*deviceStateTracker),
 		remotePausedFolders: make(map[protocol.DeviceID][]string),
 		fmut:                sync.NewRWMutex(),
 		pmut:                sync.NewRWMutex(),
+		deviceStates:        newDeviceStateMap(),
 	}
 	if cfg.Options().ProgressUpdateIntervalS > -1 {
 		go m.progressEmitter.Serve()
@@ -428,7 +429,7 @@ func (m *Model) ConnectionStats() map[string]interface{} {
 		ci := ConnectionInfo{
 			ClientVersion: strings.TrimSpace(versionString),
 			Paused:        deviceCfg.Paused,
-			State:         m.deviceStates[device].state(),
+			State:         m.deviceStates.Get(device).State(),
 		}
 		if conn, ok := m.conn[device]; ok {
 			ci.Type = conn.Type()
@@ -893,9 +894,7 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 			}
 		}
 
-		m.pmut.RLock()
-		st := m.deviceStates[deviceID]
-		m.pmut.RUnlock()
+		st := m.deviceStates.Get(deviceID)
 		go sendIndexes(conn, folder.ID, fs, m.folderIgnores[folder.ID], startSequence, dbLocation, dropSymlinks, st)
 	}
 
@@ -1095,11 +1094,10 @@ func (m *Model) Closed(conn protocol.Connection, err error) {
 	delete(m.closed, device)
 	m.pmut.Unlock()
 
+	m.deviceStates.Get(device).Disconnected(err)
+	m.deviceStates.Delete(device)
+
 	l.Infof("Connection to %s closed: %v", device, err)
-	events.Default.Log(events.DeviceDisconnected, map[string]string{
-		"id":    device.String(),
-		"error": err.Error(),
-	})
 	close(closed)
 }
 
@@ -1141,10 +1139,7 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 	folderIgnores := m.folderIgnores[folder]
 	m.fmut.RUnlock()
 
-	m.pmut.RLock()
-	deviceState := m.deviceStates[deviceID]
-	m.pmut.RUnlock()
-	deviceState.syncActivity()
+	m.deviceStates.Get(deviceID).SyncActivity()
 
 	fn, err := rootedJoinedPath(folderPath, name)
 	if err != nil {
@@ -1367,25 +1362,9 @@ func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloR
 	m.conn[deviceID] = conn
 	m.closed[deviceID] = make(chan struct{})
 	m.deviceDownloads[deviceID] = newDeviceDownloadState()
-	m.deviceStates[deviceID] = newDeviceStateTracker(deviceID)
-	m.deviceStates[deviceID].setConnected()
 
 	m.helloMessages[deviceID] = hello
-
-	event := map[string]string{
-		"id":            deviceID.String(),
-		"deviceName":    hello.DeviceName,
-		"clientName":    hello.ClientName,
-		"clientVersion": hello.ClientVersion,
-		"type":          conn.Type(),
-	}
-
-	addr := conn.RemoteAddr()
-	if addr != nil {
-		event["addr"] = addr.String()
-	}
-
-	events.Default.Log(events.DeviceConnected, event)
+	m.deviceStates.Get(deviceID).Connected(hello, conn.Type(), conn.RemoteAddr())
 
 	l.Infof(`Device %s client is "%s %s" named "%s"`, deviceID, hello.ClientName, hello.ClientVersion, hello.DeviceName)
 
@@ -1472,9 +1451,7 @@ func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignore
 	l.Debugf("sendIndexes for %s-%s/%q starting (slv=%d)", deviceID, name, folder, startSequence)
 	defer l.Debugf("sendIndexes for %s-%s/%q exiting: %v", deviceID, name, folder, err)
 
-	st.setSendingIndexes()
-	minSequence, err := sendIndexTo(startSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks)
-	st.clearSendingIndexes()
+	minSequence, err := sendIndexTo(startSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks, st)
 
 	// Subscribe to LocalIndexUpdated (we have new information to send) and
 	// DeviceDisconnected (it might be us who disconnected, so we should
@@ -1497,9 +1474,7 @@ func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignore
 			continue
 		}
 
-		st.setSendingIndexes()
-		minSequence, err = sendIndexTo(minSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks)
-		st.clearSendingIndexes()
+		minSequence, err = sendIndexTo(minSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks, st)
 
 		// Wait a short amount of time before entering the next loop. If there
 		// are continuous changes happening to the local index, this gives us
@@ -1508,7 +1483,7 @@ func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignore
 	}
 }
 
-func sendIndexTo(minSequence int64, conn protocol.Connection, folder string, fs *db.FileSet, ignores *ignore.Matcher, dbLocation string, dropSymlinks bool) (int64, error) {
+func sendIndexTo(minSequence int64, conn protocol.Connection, folder string, fs *db.FileSet, ignores *ignore.Matcher, dbLocation string, dropSymlinks bool, st *deviceStateTracker) (int64, error) {
 	deviceID := conn.ID()
 	name := conn.Name()
 	batch := make([]protocol.FileInfo, 0, indexBatchSize)
@@ -1519,6 +1494,8 @@ func sendIndexTo(minSequence int64, conn protocol.Connection, folder string, fs 
 
 	sorter := NewIndexSorter(dbLocation)
 	defer sorter.Close()
+
+	st.PreparingIndex()
 
 	fs.WithHave(protocol.LocalDeviceID, func(fi db.FileIntf) bool {
 		f := fi.(protocol.FileInfo)
@@ -1541,6 +1518,8 @@ func sendIndexTo(minSequence int64, conn protocol.Connection, folder string, fs 
 		sorter.Append(f)
 		return true
 	})
+
+	st.SendingIndex()
 
 	sorter.Sorted(func(f protocol.FileInfo) bool {
 		if len(batch) == indexBatchSize || currentBatchSize > indexTargetSize {
@@ -1577,6 +1556,8 @@ func sendIndexTo(minSequence int64, conn protocol.Connection, folder string, fs 
 			l.Debugf("sendIndexes for %s-%s/%q: %d files (last batch)", deviceID, name, folder, len(batch))
 		}
 	}
+
+	st.DoneSendingIndex()
 
 	return maxSequence, err
 }

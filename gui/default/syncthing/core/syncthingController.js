@@ -192,6 +192,7 @@ angular.module('syncthing.core')
 
         $scope.$on(Events.DEVICE_DISCONNECTED, function (event, arg) {
             $scope.connections[arg.data.id].connected = false;
+            $scope.connections[arg.data.id].state = 'disconnected';
             refreshDeviceStats();
         });
 
@@ -211,6 +212,10 @@ angular.module('syncthing.core')
                     _total: 100
                 };
             }
+        });
+
+        $scope.$on(Events.DEVICE_STATE_CHANGED, function (event, arg) {
+            $scope.connections[arg.data.id].state = arg.data.to;
         });
 
         $scope.$on('ConfigLoaded', function () {
@@ -807,7 +812,14 @@ angular.module('syncthing.core')
             }
 
             if ($scope.connections[deviceCfg.deviceID].state === 'idle' &&
-                $scope.completion[deviceCfg.deviceID] && $scope.completion[deviceCfg.deviceID]._total === 100) {
+                $scope.completion[deviceCfg.deviceID] &&
+                $scope.completion[deviceCfg.deviceID]._total === 100) {
+                return 'insync';
+            }
+
+            if ($scope.connections[deviceCfg.deviceID].state === 'syncing' &&
+                $scope.completion[deviceCfg.deviceID] &&
+                $scope.completion[deviceCfg.deviceID]._total === 100) {
                 return 'insync';
             }
 
@@ -833,6 +845,12 @@ angular.module('syncthing.core')
             }
 
             if ($scope.connections[deviceCfg.deviceID].state === 'idle' &&
+                $scope.completion[deviceCfg.deviceID] &&
+                $scope.completion[deviceCfg.deviceID]._total === 100) {
+                return 'success';
+            }
+
+            if ($scope.connections[deviceCfg.deviceID].state === 'syncing' &&
                 $scope.completion[deviceCfg.deviceID] &&
                 $scope.completion[deviceCfg.deviceID]._total === 100) {
                 return 'success';
