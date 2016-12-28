@@ -97,6 +97,7 @@ type Model struct {
 	closed              map[protocol.DeviceID]chan struct{}
 	helloMessages       map[protocol.DeviceID]protocol.HelloResult
 	deviceDownloads     map[protocol.DeviceID]*deviceDownloadState
+	deviceStates        map[protocol.DeviceID]*deviceStateTracker
 	remotePausedFolders map[protocol.DeviceID][]string // deviceID -> folders
 	pmut                sync.RWMutex                   // protects the above
 }
@@ -158,6 +159,7 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, deviceName, clientName,
 		closed:              make(map[protocol.DeviceID]chan struct{}),
 		helloMessages:       make(map[protocol.DeviceID]protocol.HelloResult),
 		deviceDownloads:     make(map[protocol.DeviceID]*deviceDownloadState),
+		deviceStates:        make(map[protocol.DeviceID]*deviceStateTracker),
 		remotePausedFolders: make(map[protocol.DeviceID][]string),
 		fmut:                sync.NewRWMutex(),
 		pmut:                sync.NewRWMutex(),
@@ -392,6 +394,7 @@ type ConnectionInfo struct {
 	Address       string
 	ClientVersion string
 	Type          string
+	State         deviceState
 }
 
 func (info ConnectionInfo) MarshalJSON() ([]byte, error) {
@@ -404,6 +407,7 @@ func (info ConnectionInfo) MarshalJSON() ([]byte, error) {
 		"address":       info.Address,
 		"clientVersion": info.ClientVersion,
 		"type":          info.Type,
+		"state":         info.State.String(),
 	})
 }
 
@@ -424,6 +428,7 @@ func (m *Model) ConnectionStats() map[string]interface{} {
 		ci := ConnectionInfo{
 			ClientVersion: strings.TrimSpace(versionString),
 			Paused:        deviceCfg.Paused,
+			State:         m.deviceStates[device].state(),
 		}
 		if conn, ok := m.conn[device]; ok {
 			ci.Type = conn.Type()
@@ -888,7 +893,10 @@ func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 			}
 		}
 
-		go sendIndexes(conn, folder.ID, fs, m.folderIgnores[folder.ID], startSequence, dbLocation, dropSymlinks)
+		m.pmut.RLock()
+		st := m.deviceStates[deviceID]
+		m.pmut.RUnlock()
+		go sendIndexes(conn, folder.ID, fs, m.folderIgnores[folder.ID], startSequence, dbLocation, dropSymlinks, st)
 	}
 
 	m.pmut.Lock()
@@ -1133,6 +1141,11 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 	folderIgnores := m.folderIgnores[folder]
 	m.fmut.RUnlock()
 
+	m.pmut.RLock()
+	deviceState := m.deviceStates[deviceID]
+	m.pmut.RUnlock()
+	deviceState.syncActivity()
+
 	fn, err := rootedJoinedPath(folderPath, name)
 	if err != nil {
 		// Request tries to escape!
@@ -1354,6 +1367,8 @@ func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloR
 	m.conn[deviceID] = conn
 	m.closed[deviceID] = make(chan struct{})
 	m.deviceDownloads[deviceID] = newDeviceDownloadState()
+	m.deviceStates[deviceID] = newDeviceStateTracker(deviceID)
+	m.deviceStates[deviceID].setConnected()
 
 	m.helloMessages[deviceID] = hello
 
@@ -1449,7 +1464,7 @@ func (m *Model) receivedFile(folder string, file protocol.FileInfo) {
 	m.folderStatRef(folder).ReceivedFile(file.Name, file.IsDeleted())
 }
 
-func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignores *ignore.Matcher, startSequence int64, dbLocation string, dropSymlinks bool) {
+func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignores *ignore.Matcher, startSequence int64, dbLocation string, dropSymlinks bool, st *deviceStateTracker) {
 	deviceID := conn.ID()
 	name := conn.Name()
 	var err error
@@ -1457,7 +1472,9 @@ func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignore
 	l.Debugf("sendIndexes for %s-%s/%q starting (slv=%d)", deviceID, name, folder, startSequence)
 	defer l.Debugf("sendIndexes for %s-%s/%q exiting: %v", deviceID, name, folder, err)
 
+	st.setSendingIndexes()
 	minSequence, err := sendIndexTo(startSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks)
+	st.clearSendingIndexes()
 
 	// Subscribe to LocalIndexUpdated (we have new information to send) and
 	// DeviceDisconnected (it might be us who disconnected, so we should
@@ -1480,7 +1497,9 @@ func sendIndexes(conn protocol.Connection, folder string, fs *db.FileSet, ignore
 			continue
 		}
 
+		st.setSendingIndexes()
 		minSequence, err = sendIndexTo(minSequence, conn, folder, fs, ignores, dbLocation, dropSymlinks)
+		st.clearSendingIndexes()
 
 		// Wait a short amount of time before entering the next loop. If there
 		// are continuous changes happening to the local index, this gives us

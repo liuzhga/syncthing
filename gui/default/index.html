@@ -537,6 +537,8 @@
                 <identicon class="panel-icon" data-value="deviceCfg.deviceID"></identicon>
                 <span ng-switch="deviceStatus(deviceCfg)" class="pull-right text-{{deviceClass(deviceCfg)}}">
                   <span ng-switch-when="insync"><span class="hidden-xs" translate>Up to Date</span><span class="visible-xs">&#9724;</span></span>
+                  <span ng-switch-when="idle"><span class="hidden-xs" translate>Idle</span><span class="visible-xs">&#9724;</span></span>
+                  <span ng-switch-when="sendingIndexes"><span class="hidden-xs" translate>Sending Indexes</span><span class="visible-xs">&#9724;</span></span>
                   <span ng-switch-when="syncing">
                     <span class="hidden-xs" translate>Syncing</span> ({{completion[deviceCfg.deviceID]._total | number:0}}%)
                   </span>

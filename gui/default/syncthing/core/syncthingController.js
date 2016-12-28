@@ -198,12 +198,14 @@ angular.module('syncthing.core')
         $scope.$on(Events.DEVICE_CONNECTED, function (event, arg) {
             if (!$scope.connections[arg.data.id]) {
                 $scope.connections[arg.data.id] = {
+                    connected: true,
                     inbps: 0,
                     outbps: 0,
                     inBytesTotal: 0,
                     outBytesTotal: 0,
                     type: arg.data.type,
-                    address: arg.data.addr
+                    address: arg.data.addr,
+                    state: arg.data.state
                 };
                 $scope.completion[arg.data.id] = {
                     _total: 100
@@ -804,16 +806,12 @@ angular.module('syncthing.core')
                 return 'paused';
             }
 
-            if ($scope.connections[deviceCfg.deviceID].connected) {
-                if ($scope.completion[deviceCfg.deviceID] && $scope.completion[deviceCfg.deviceID]._total === 100) {
-                    return 'insync';
-                } else {
-                    return 'syncing';
-                }
+            if ($scope.connections[deviceCfg.deviceID].state === 'idle' &&
+                $scope.completion[deviceCfg.deviceID] && $scope.completion[deviceCfg.deviceID]._total === 100) {
+                return 'insync';
             }
 
-            // Disconnected
-            return 'disconnected';
+            return $scope.connections[deviceCfg.deviceID].state;
         };
 
         $scope.deviceClass = function (deviceCfg) {
@@ -825,21 +823,22 @@ angular.module('syncthing.core')
             if (typeof $scope.connections[deviceCfg.deviceID] === 'undefined') {
                 return 'info';
             }
+            if (!$scope.connections[deviceCfg.deviceID].connected) {
+                return 'info';
+            }
+
 
             if (deviceCfg.paused) {
                 return 'default';
             }
 
-            if ($scope.connections[deviceCfg.deviceID].connected) {
-                if ($scope.completion[deviceCfg.deviceID] && $scope.completion[deviceCfg.deviceID]._total === 100) {
-                    return 'success';
-                } else {
-                    return 'primary';
-                }
+            if ($scope.connections[deviceCfg.deviceID].state === 'idle' &&
+                $scope.completion[deviceCfg.deviceID] &&
+                $scope.completion[deviceCfg.deviceID]._total === 100) {
+                return 'success';
             }
 
-            // Disconnected
-            return 'info';
+            return 'primary';
         };
 
         $scope.syncthingStatus = function () {

@@ -11,6 +11,7 @@ type FolderType int
 const (
 	FolderTypeSendReceive FolderType = iota // default is sendreceive
 	FolderTypeSendOnly
+	FolderTypeSink
 )
 
 func (t FolderType) String() string {
@@ -19,6 +20,8 @@ func (t FolderType) String() string {
 		return "readwrite"
 	case FolderTypeSendOnly:
 		return "readonly"
+	case FolderTypeSink:
+		return "sink"
 	default:
 		return "unknown"
 	}
@@ -34,6 +37,8 @@ func (t *FolderType) UnmarshalText(bs []byte) error {
 		*t = FolderTypeSendReceive
 	case "readonly", "sendonly":
 		*t = FolderTypeSendOnly
+	case "sink":
+		*t = FolderTypeSink
 	default:
 		*t = FolderTypeSendReceive
 	}
