@@ -1,3 +1,5 @@
+!*.always
+
 #include excludes
 
 bfile

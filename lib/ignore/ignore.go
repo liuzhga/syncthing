@@ -232,6 +232,21 @@ func (m *Matcher) Stop() {
 	close(m.stop)
 }
 
+func (m *Matcher) HasExcludePatterns() bool {
+	if m == nil {
+		return false
+	}
+
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	for _, p := range m.patterns {
+		if p.result&resultInclude == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Matcher) clean(d time.Duration) {
 	t := time.NewTimer(d / 2)
 	for {

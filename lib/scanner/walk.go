@@ -216,12 +216,16 @@ func (w *walker) walk() (chan protocol.FileInfo, error) {
 
 func (w *walker) walkAndHashFiles(fchan, dchan chan protocol.FileInfo) filepath.WalkFunc {
 	now := time.Now()
+	skippedDirs := make(map[string]struct{})
 	return func(absPath string, info os.FileInfo, err error) error {
 		// Return value used when we are returning early and don't want to
 		// process the item. For directories, this means do-not-descend.
 		var skip error // nil
 		// info nil when error is not nil
-		if info != nil && info.IsDir() {
+		if info != nil && info.IsDir() && !w.Matcher.HasExcludePatterns() {
+			// When skipping, we do not recurse into the directory unless we
+			// have exclude (unignore) patterns.
+			l.Debugln("skip is skipdir")
 			skip = filepath.SkipDir
 		}
 
@@ -262,6 +266,12 @@ func (w *walker) walkAndHashFiles(fchan, dchan chan protocol.FileInfo) filepath.
 
 		if w.Matcher.Match(relPath).IsIgnored() {
 			l.Debugln("ignored (patterns):", relPath)
+			if info.IsDir() && skip != filepath.SkipDir {
+				// We are descending into an ignored directory to look for
+				// unignored files. Remember that we did this and may need
+				// to scan this directory if we find an unignored file.
+				skippedDirs[relPath] = struct{}{}
+			}
 			return skip
 		}
 
@@ -273,6 +283,19 @@ func (w *walker) walkAndHashFiles(fchan, dchan chan protocol.FileInfo) filepath.
 		relPath, shouldSkip := w.normalizePath(absPath, relPath)
 		if shouldSkip {
 			return skip
+		}
+
+		for parent := filepath.Dir(relPath); len(parent) > 1; parent = filepath.Dir(parent) {
+			// Check if any of the parent dirs to the file we are about to
+			// scan have been skipped by ignore patterns. If so, scan that
+			// dir now.
+			if _, ok := skippedDirs[parent]; ok {
+				l.Debugln("walking previously skipped dir", parent)
+				absPath := filepath.Join(w.Dir, parent)
+				info, _ := w.Lstater.Lstat(absPath)
+				w.walkDir(parent, info, dchan)
+				delete(skippedDirs, parent)
+			}
 		}
 
 		switch {
