@@ -2434,6 +2434,44 @@ func TestRootedJoinedPath(t *testing.T) {
 	}
 }
 
+func TestScanDeepUnignore(t *testing.T) {
+	// If foo is an ignored directory, but foo/bar is an unignored file,
+	// then we should have valid index entries for both foo and foo/bar.
+
+	os.RemoveAll("_tmpdir")
+	defer os.RemoveAll("_tmpdir")
+	os.MkdirAll("_tmpdir/foo", 0755)
+	ioutil.WriteFile("_tmpdir/foo/bar", []byte("hej\n"), 0644)
+	ioutil.WriteFile("_tmpdir/.stignore", []byte("!bar\nfoo\n"), 0644)
+
+	db := db.OpenMemory()
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	folderCfg := config.NewFolderConfiguration("default", "_tmpdir")
+	m.AddFolder(folderCfg)
+	m.StartFolder("default")
+	m.ServeBackground()
+	defer m.Stop()
+
+	// Scan the folder.
+
+	m.ScanFolder("default")
+
+	info, ok := m.CurrentFolderFile("default", "foo")
+	if !ok {
+		t.Fatal("missing index entry for foo")
+	}
+	if info.Invalid {
+		t.Error("directory foo should not be invalid")
+	}
+	info, ok = m.CurrentFolderFile("default", "foo/bar")
+	if !ok {
+		t.Fatal("missing index entry for foo/bar")
+	}
+	if info.Invalid {
+		t.Error("file foo/bar should not be invalid")
+	}
+}
+
 func addFakeConn(m *Model, dev protocol.DeviceID) *fakeConnection {
 	fc := &fakeConnection{id: dev, model: m}
 	m.AddConnection(fc, protocol.HelloResult{})
